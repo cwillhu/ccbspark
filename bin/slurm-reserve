@@ -1,0 +1,153 @@
+#!/bin/bash
+
+#####################################################
+# Submit sbatch script to request Slurm resources, and 
+# create directory for Slurm job.
+# Globals:
+#   CCBSPARK_HOME (optional)
+#   CCBSPARK_JOBS_DIR (optional)
+#   EMAIL (optional)
+# Arguments:
+#   See usage below
+#####################################################
+
+set -eu  #exit on error, unset var
+
+job_name=''
+ccbspark_jobs_dir=''
+
+# Defaults
+mem_per_cpu="5G"
+cpus_per_task=4
+ntasks_per_node=1
+nnodes=2
+time_reservation="0-06:00:01"
+email=${EMAIL:=''}  #empty string if unset
+force_delete="false"
+
+usage() {
+    cat << EOF
+
+    $(basename $0): Reserve slurm resources for Spark and create job directory
+
+    Usage:
+    $(basename $0) [-f] [-h] [-J job_name] [-m mem_per_cpu] [-c cpus_per_task] 
+    [-n ntasks_per_node] [-N nnodes] [-t time] [-e email] [-d jobs_dir] 
+
+    Option
+    -h      Help
+    -f      Overwrite any existing job directory
+
+    Option  Name                Default
+    -J      job_name            ccbspark-job
+    -m      mem_per_cpu         $mem_per_cpu
+    -c      cpus_per_task       $cpus_per_task
+    -n      ntasks_per_node     $ntasks_per_node
+    -N      nnodes              $nnodes
+    -t      time                $time_reservation  (days-hr:min:sec)
+    -e      email               Environment variable \$EMAIL, otherwise none
+    -d      jobs_dir            Directory where job directory will be created. Default: Environment 
+                                variable \$CCBSPARK_JOBS_DIR, otherwise current directory.
+
+    For more information on Slurm options, see the Slurm documentation.
+EOF
+    exit 1
+}
+
+# Handle input options
+while getopts ":fJ:m:c:n:N:t:e:d:" flag; do
+    case "${flag}" in
+        J)
+            job_name=${OPTARG}
+            ;;
+        m)
+            mem_per_cpu=${OPTARG}
+            ;;
+        c)
+            cpus_per_task=${OPTARG}
+            ;;
+        n)
+            ntasks_per_node=${OPTARG}
+            ;;
+        N)
+            nnodes=${OPTARG}
+            ;;
+        t)
+            time_reservation=${OPTARG}
+            ;;
+        e)
+            email=${OPTARG}
+            ;;
+        d)
+            ccbspark_jobs_dir=${OPTARG}
+            ;;
+        f)
+            force_delete="true"
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+
+# If unset by input option, set ccbspark jobs dir 
+if [[ -z $ccbspark_jobs_dir ]]; then
+	if [[ -n $CCBSPARK_JOBS_DIR ]]; then
+		ccbspark_jobs_dir=$CCBSPARK_JOBS_DIR
+	else
+		ccbspark_jobs_dir=$(pwd)
+	fi
+fi
+		
+# If unset by input option, set job name
+if [[ -z $job_name ]]; then
+	job_name='ccbspark-job'
+fi
+
+# Set job dir
+job_dir=$ccbspark_jobs_dir/$job_name
+
+# Delete existing job dir if force_delete was set, else add increment to job name and create new dir
+if [[ -d $job_dir ]]; then
+	if [[ $force_delete == "true" ]]; then
+		echo "Deleting existing job directory ${job_dir}..."
+		rm -rf $job_dir
+	else
+		#add increment to job name until unexisting dir name is found
+		i=2
+		orig=$job_name
+		while
+		    job_name=${orig}${i}
+			job_dir=$ccbspark_jobs_dir/$job_name
+		    [[ -d $job_dir ]] && ((i=i+1))
+		do :; done
+	fi
+fi
+
+# Create job directory
+echo "Creating job directory ${job_dir}..."
+mkdir -p $job_dir  
+
+# Set ccbspark home
+if [ -z "$CCBSPARK_HOME" ]; then
+  CCBSPARK_HOME="$(cd "`dirname "$0"`"/..; pwd)"
+fi
+
+# Write sbatch script with slurm reservation parameters to job directory
+templatefile=$CCBSPARK_HOME/sbatch/keep-alive.sh
+submitfile="$job_dir/$(basename $templatefile)"
+cat $templatefile \
+    | sed -e s/\<JOB_NAME\>/$job_name/               \
+          -e s/\<MEM_PER_CPU\>/$mem_per_cpu/         \
+          -e s/\<CPUS_PER_TASK\>/$cpus_per_task/     \
+          -e s/\<NTASKS_PER_NODE\>/$ntasks_per_node/ \
+          -e s/\<NNODES\>/$nnodes/                   \
+          -e s/\<TIME\>/$time_reservation/           \
+          -e s/\<EMAIL\>/$email/                     \
+          -e s+\<JOB_DIR\>+$job_dir+                 \
+	> $submitfile 
+echo "Wrote $submitfile"
+
+# Submit sbatch script
+sbatch $submitfile

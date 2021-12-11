@@ -1,0 +1,8 @@
+export EMAIL="username@example.com"
+export CCBSPARK_HOME=/path/to/ccbspark
+export CCBSPARK_JOBS_DIR=/path/to/jobs/dir
+
+if [[ ":$PATH:" != *":$CCBSPARK_HOME/bin:"* ]] ; then 
+    export PATH="$CCBSPARK_HOME/bin:$PATH"
+fi
+

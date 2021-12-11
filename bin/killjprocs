@@ -1,0 +1,13 @@
+
+# Kill user's java and java_cmd processes (if processes fail to stop with spark commands)
+
+echo 'Stopping java procs on localhost...'
+procs=$(pgrep -u $USER java)
+[[ -n $procs ]] && kill -9 $procs
+
+echo 'Stopping java procs on remote hosts...'
+for host in $CCBSPARK_NODELIST; do
+    if [[ $host != ${HOSTNAME%%.*} ]]; then
+        ssh ${USER}@${host} 'procs=$(pgrep -u $USER java); [[ -n $procs ]] && kill -9 $procs'
+    fi
+done

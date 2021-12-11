@@ -1,0 +1,189 @@
+#!/bin/bash
+
+##############################################################
+# Create initialization script for Spark master node; write script to job directory.
+# Globals:
+#   CCBSPARK_HOME
+# Argument:
+#   A slurm job directory, as created by slurm-reserve command. The current dir is taken 
+#   to be the slurm job directory if none specified.
+##############################################################
+
+set -eu  #exit on error, unset var
+
+usage() {
+    cat <<EOM
+    Write master initialization script to job directory
+    Usage:
+    $(basename $0) [-h] <slurm_job_directory>
+
+    Option
+    -h      Help
+EOM
+    exit 1
+}
+
+# Error function
+err() {
+    echo "$(basename $0): $1" 1>&2; usage; exit 1
+}
+
+# Handle input options
+while getopts ":h" flag; do
+    case "$flag" in
+        *)
+            usage
+            ;;
+    esac
+done
+shift $((OPTIND-1))  #leaving in case more opts added in future
+
+# Handle non-option argument, if present
+current_dir=$(pwd)
+if [[ $# -eq 0 ]]; then
+	job_dir=$current_dir
+elif [[ $# -eq 1 ]]; then
+	job_dir=$1
+else
+	err "0 or 1 arguments expected, found $#."
+fi
+
+# Set ccbspark home
+if [[ -z "$CCBSPARK_HOME" ]]; then
+	export CCBSPARK_HOME="$(cd "`dirname "$0"`"/..; pwd)"
+fi
+
+
+###
+# Error checking
+###
+
+# Check that job_dir exists 
+if [[ ! -d $job_dir ]]; then
+    err "Job directory $job_dir doesn't exist"
+fi
+
+# Check that job_dir contains one .env file (created by the running slurm job)
+slurm_envfile="$job_dir"/$(cd $job_dir; find * -regextype posix-extended -regex "[0-9]+\.master.env")
+num_envfiles=$(cat $slurm_envfile | wc -l)
+if [[ $num_envfiles != 1 ]]; then
+    err "Job directory $job_dir must contain one slurm env file of the form '<JOB_ID>.env'. Found $num_envfiles files."
+fi
+
+# Check that job_dir contains one hostname file (created by the running slurm job)
+slurm_hostnamefile="$job_dir"/$(cd $job_dir; find * -regextype posix-extended -regex "[0-9]+\.master.hostname")
+num_hostnamefiles=$(cat $slurm_hostnamefile | wc -l)
+if [[ $num_hostnamefiles != 1 ]]; then
+    err "Job directory $job_dir must contain one hostname file of the form '<JOB_ID>.hostname'. Found $num_hostnamefiles files."
+fi
+
+# Get jobID from name of the .env file
+slurm_envfile_basename=$(basename $slurm_envfile)
+jobID=${slurm_envfile_basename%%\.*}  #remove suffix to get jobID from filename
+
+# Check that slurm job is running
+job_state=$(sacct --format='State' -j $jobID | paste -d' ')
+if [[ ! "$job_state" =~ "RUNNING" ]]; then
+    err "Found $slurm_envfile, but job $jobID is not running. Job state: $job_state"
+fi
+
+
+##
+# Slurm runs the keep-alive script on only one of the nodes in the job reservation. This node will become the 
+# spark master. When keep-alive is started it saves the name of this host in <jobDir>/<jobID>.master.hostname
+# and writes all slurm environment variables to <jobDir>/<jobID>.master.env.
+##
+
+# Get master hostname from .hostname file in job directory
+master_hostname_full=$(cat $slurm_hostnamefile)
+master_hostname=${master_hostname_full%%\.*} 
+
+# Get nodelist from slurm environment var
+slurm_env=$(cat $slurm_envfile)
+regex="SLURM_NODELIST='([][a-zA-Z0-9-]+)'" #regex pattern must be in var otherwise not interpreted correctly
+if [[ $slurm_env =~ $regex ]]; then
+    nodelist_compressed="${BASH_REMATCH[1]}"
+else
+	err "Unable to read nodelist in: $slurm_env"
+fi
+nodelist=$(scontrol show hostname $nodelist_compressed |tr '\n' ' ' |sed 's/ $//')  #expand slurm nodelist shorthand, remove \n's
+
+##
+# Create config files for this job
+##
+
+# Set config dir for Spark
+spark_conf_dir=$job_dir/spark_conf
+mkdir -p $spark_conf_dir
+
+# Write node list to workers file in Spark conf dir
+workersfile=$spark_conf_dir/workers
+: > $workersfile #create/clear file
+for node in $nodelist; do
+	echo $node >> $workersfile  #write one host per line
+done
+
+# Write JAVA_HOME and add JAVA_HOME/bin to PATH in spark-env.sh
+cat > $spark_conf_dir/spark-env.sh << 'EOF'  #quotes prevent variable substitution
+export JAVA_HOME=/n/app/ccb/java/jdk-1.8u112
+if [[ ":$PATH:" != *":$JAVA_HOME/bin:"* ]]; then
+	export PATH="$JAVA_HOME/bin:$PATH"
+fi 
+EOF
+
+##
+# Create init script to set environment on master node
+##
+
+# Set filenames of init scripts
+master_initfile=$job_dir/initenv_master.sh
+worker_initfile=$job_dir/initenv_worker.sh
+
+# with var substitution:
+config1="
+[[ -f ~/.profile ]] && source ~/.profile
+cd $job_dir
+
+export CCBSPARK_HOME='/n/app/ccb/ccbspark/ccbspark'
+export SPARK_HOME='/n/app/ccb/spark/spark-3.2.0-bin-hadoop3.2-scala2.13'
+export SPARK_IDENT_STRING='CCBSPARK_'$jobID  # identify the spark cluster with this slurm jobID
+export SPARK_LOG_DIR=$job_dir/logs
+export SPARK_CONF_DIR=$spark_conf_dir
+export HADOOP_HOME='/n/app/ccb/hadoop/hadoop-3.2.2'
+export CCBTAG=CCBSPARK_LOG
+export CCBSPARK_NODELIST='$nodelist'
+export MASTER_URL=spark://${master_hostname}:7077
+export JAVA_HOME=/n/app/ccb/java/jdk-1.8u112
+export JRE_HOME=/n/app/ccb/java/jdk-1.8u112/jre
+
+alias apps='yarn application --list'  #shortcuts
+alias logs='yarn logs -applicationId'
+"
+
+# without variable substitution:
+config2='
+export HADOOP_CONF_DIR=$HADOOP_HOME/etc/hadoop
+[[ ":$PATH:" != *":$JAVA_HOME/bin:"* ]]     && export PATH="$JAVA_HOME/bin:$PATH"
+[[ ":$PATH:" != *":$HADOOP_HOME/sbin"* ]]   && export PATH="$HADOOP_HOME/sbin:$PATH"
+[[ ":$PATH:" != *":$HADOOP_HOME/bin"* ]]    && export PATH="$HADOOP_HOME/bin:$PATH"
+[[ ":$PATH:" != *":$SPARK_HOME/sbin:"* ]]   && export PATH="$SPARK_HOME/sbin:$PATH"
+[[ ":$PATH:" != *":$SPARK_HOME/bin:"* ]]    && export PATH="$SPARK_HOME/bin:$PATH"
+[[ ":$PATH:" != *":$CCBSPARK_HOME/bin:"* ]] && export PATH="$CCBSPARK_HOME/bin:$PATH"
+'
+
+# Write out master init file
+echo "#Initialization for master node: $master_hostname" > $master_initfile
+echo "export PS1='SLURM-ENV \u@\h \w \\$ '" >> $master_initfile
+echo "$config1" >> $master_initfile
+echo "$config2" >> $master_initfile
+
+for var_assignment in $(cat $slurm_envfile); do # Add slurm env vars to master initfile
+	echo "export $var_assignment" >> $master_initfile
+done
+
+# Write out worker init file
+echo "#Initialization for worker" > $worker_initfile
+echo "$config1" >> $worker_initfile
+echo "$config2" >> $worker_initfile
+
+

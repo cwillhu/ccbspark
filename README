@@ -1,0 +1,25 @@
+
+Steps to run Spark on Slurm:
+
+1. Copy setup.sh from installation directory to local directory. Edit file to set paths and 
+   email address for notifications. Then run:
+       source setup.sh
+
+2. Reserve Slurm nodes in the MPI partition:
+       slurm-reserve
+   (Use 'slurm-reserve -h' to see reservation defaults and options)
+
+3. After your Slurm job has started, ssh to master node:
+       master-ssh
+
+4. Start master Spark process and one Spark worker on each reserved node:
+       start-all.sh
+
+5. Launch Spark job, for example:
+       spark-submit --master ${MASTER_URL} \
+			 --deploy-mode client \
+			 --num-executors 2 \
+			 --conf spark.executor.cores=30 \
+			 $SPARK_HOME/examples/src/main/python/pi.py 500000
+
+

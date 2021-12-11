@@ -1,0 +1,105 @@
+#!/bin/bash
+
+##############################################################
+# Ssh to master node and initialize environment
+# Globals:
+#   CCBSPARK_HOME 
+# Arguments:
+#   A slurm job directory. Current dir is assumed to be
+#   slurm job directory if none provided.
+##############################################################
+
+set -eu  #exit on error, unset var
+
+usage() {
+    cat <<EOM
+
+    $(basename $0): Ssh to master node and initialize environment
+
+    Usage:
+    $(basename $0) [-h] <job_directory>
+
+    Option
+    -h      Help
+EOM
+    exit 1
+}
+
+# Error function
+err() {
+    echo "$(basename $0): $1" 1>&2; usage; exit 1
+}
+
+# Handle input options
+while getopts ":h" flag; do
+    case "$flag" in
+        *)
+            usage
+            ;;
+    esac
+done
+shift $((OPTIND-1))  #leaving in case more opts added in future
+
+# Handle non-option argument, if present
+current_dir=$(pwd)
+if [[ $# -eq 0 ]]; then
+	job_dir=$current_dir
+elif [[ $# -eq 1 ]]; then
+	job_dir=$1
+else
+	err "0 or 1 arguments expected, found $#."
+fi
+
+###
+# Error checking
+###
+
+# Check that job_dir exists 
+if [[ ! -d $job_dir ]]; then
+    err "Job directory $job_dir doesn't exist"
+fi
+
+# Check that job_dir contains one .env file (created by the running slurm job)
+slurm_envfile="$job_dir"/$(cd $job_dir; find * -regextype posix-extended -regex "[0-9]+\.master.env")
+num_envfiles=$(cat $slurm_envfile | wc -l)
+if [[ $num_envfiles != 1 ]]; then
+    err "Job directory $job_dir must contain one slurm env file of the form '<JOB_ID>.master.env'. Found $num_envfiles files."
+fi
+
+# Check that job_dir contains one hostname file (created by the running slurm job)
+slurm_hostnamefile="$job_dir"/$(cd $job_dir; find * -regextype posix-extended -regex "[0-9]+\.master.hostname")
+num_hostnamefiles=$(cat $slurm_hostnamefile | wc -l)
+if [[ $num_hostnamefiles != 1 ]]; then
+    err "Job directory $job_dir must contain one hostname file of the form '<JOB_ID>.master.hostname'. Found $num_hostnamefiles files."
+fi
+
+# Get jobID from name of the .env file
+slurm_envfile_basename=$(basename $slurm_envfile)
+jobID=${slurm_envfile_basename%%\.*}  #remove suffix to get jobID from filename
+
+# Check that slurm job is running
+job_state=$(sacct --format='State' -j $jobID | paste -d' ')
+if [[ ! $job_state =~ "RUNNING" ]]; then
+    err "Found $slurm_envfile, but job $jobID is not running. Job state: $job_state"
+fi
+
+# Get master hostname from .hostname file in job directory
+master_hostname_full=$(cat $slurm_hostnamefile)
+master_hostname=${master_hostname_full%%\.*} 
+
+###
+# Config
+###
+
+# Create init scripts if not in job directory
+master_initfile=$job_dir/initenv_master.sh
+worker_initfile=$job_dir/initenv_worker.sh
+if [[ ! -f $master_initfile || ! -f $worker_initfile ]]; then
+	ccbspark-config $job_dir  #create init scripts
+fi
+
+# Ssh the user to master node, set up environment via master init script
+echo "ssh-ing to master node $master_hostname ..."
+exec ssh -t $master_hostname "bash --init-file <(cat $master_initfile)"
+
+
